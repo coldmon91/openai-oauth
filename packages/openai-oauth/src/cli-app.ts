@@ -10,7 +10,6 @@ import { installCliWarningLogger, toStartupMessage } from "./cli-logging.js"
 import { startOpenAIOAuthServer } from "./index.js"
 import { resolveOpenAIOAuthModels } from "./models.js"
 import { DEFAULT_PORT } from "./shared.js"
-import { checkForOpenAIOAuthUpdates } from "./update-check.js"
 
 export type CliArgs = {
 	host?: string
@@ -207,12 +206,6 @@ export const runCli = async (argv: string[] = hideBin(process.argv)) => {
 			},
 		),
 	)
-
-	void checkForOpenAIOAuthUpdates(packageJson.version, {
-		onWarning: (message) => {
-			console.error(message)
-		},
-	})
 
 	const shutdown = async () => {
 		await server.close()
