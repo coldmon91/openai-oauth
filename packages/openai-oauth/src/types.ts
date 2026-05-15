@@ -86,7 +86,7 @@ type UsageLike = {
 	cachedInputTokens?: number
 }
 
-export type OpenAIOAuthServerLogEvent =
+export type OpenAIOAuthServerLogPayload =
 	| ({
 			type: "chat_request"
 			requestId: string
@@ -109,6 +109,10 @@ export type OpenAIOAuthServerLogEvent =
 			path: "/v1/chat/completions"
 			requestId: string
 	  }
+
+export type OpenAIOAuthServerLogEvent = OpenAIOAuthServerLogPayload & {
+	timestamp: string
+}
 
 export const defaultOpenAIOAuthModels: readonly string[] = [
 	"gpt-5.4",

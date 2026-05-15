@@ -295,7 +295,10 @@ describe("openai oauth server", () => {
 				type: "chat_error",
 				path: "/v1/chat/completions",
 				message: "`messages` must be an array.",
+				timestamp: expect.any(String),
 			}),
 		)
+		const [logEvent] = requestLogger.mock.calls[0] ?? []
+		expect(Date.parse(logEvent.timestamp)).not.toBeNaN()
 	})
 })

@@ -1,5 +1,6 @@
 import type {
 	OpenAIOAuthServerLogEvent,
+	OpenAIOAuthServerLogPayload,
 	OpenAIOAuthServerOptions,
 } from "./types.js"
 
@@ -18,7 +19,6 @@ export const createRequestLogger = (
 		console.log(
 			JSON.stringify({
 				source: "openai-oauth",
-				timestamp: new Date().toISOString(),
 				...event,
 			}),
 		)
@@ -27,9 +27,12 @@ export const createRequestLogger = (
 
 export const emitRequestLog = (
 	logger: ((event: OpenAIOAuthServerLogEvent) => void) | undefined,
-	event: OpenAIOAuthServerLogEvent,
+	event: OpenAIOAuthServerLogPayload,
 ) => {
 	try {
-		logger?.(event)
+		logger?.({
+			...event,
+			timestamp: new Date().toISOString(),
+		})
 	} catch {}
 }
