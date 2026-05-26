@@ -1,5 +1,6 @@
 import { OpenAIResponsesLanguageModel } from "@ai-sdk/openai/internal"
 import {
+	type JSONObject,
 	type LanguageModelV3,
 	type LanguageModelV3Content,
 	type LanguageModelV3FinishReason,
@@ -32,11 +33,42 @@ type OpenAIConfig = {
 	fileIdPrefixes?: readonly string[]
 }
 
+type LanguageModelCallOptions = Parameters<LanguageModelV3["doStream"]>[0]
+
 const emptyUsage = (): LanguageModelV3Usage => ({
-	inputTokens: undefined,
-	outputTokens: undefined,
-	totalTokens: undefined,
+	inputTokens: {
+		total: undefined,
+		noCache: undefined,
+		cacheRead: undefined,
+		cacheWrite: undefined,
+	},
+	outputTokens: {
+		total: undefined,
+		text: undefined,
+		reasoning: undefined,
+	},
 })
+
+const withDefaultOpenAIStore = (
+	options: LanguageModelCallOptions,
+	store: boolean,
+): LanguageModelCallOptions => {
+	const providerOptions = options.providerOptions ?? {}
+	const openaiOptions = providerOptions.openai ?? {}
+	const nextOpenAIOptions: JSONObject = { ...openaiOptions }
+
+	if (nextOpenAIOptions.store === undefined) {
+		nextOpenAIOptions.store = store
+	}
+
+	return {
+		...options,
+		providerOptions: {
+			...providerOptions,
+			openai: nextOpenAIOptions,
+		},
+	}
+}
 
 const mergeProviderMetadata = (
 	left: SharedV3ProviderMetadata | undefined,
@@ -55,10 +87,27 @@ const mergeProviderMetadata = (
 }
 
 class CodexResponsesLanguageModel extends OpenAIResponsesLanguageModel {
+	private readonly defaultStore: boolean
+
+	constructor(
+		modelId: OpenAIOAuthModelId,
+		config: OpenAIConfig,
+		defaultStore: boolean,
+	) {
+		super(modelId, config)
+		this.defaultStore = defaultStore
+	}
+
+	async doStream(
+		options: Parameters<LanguageModelV3["doStream"]>[0],
+	): Promise<Awaited<ReturnType<LanguageModelV3["doStream"]>>> {
+		return super.doStream(withDefaultOpenAIStore(options, this.defaultStore))
+	}
+
 	async doGenerate(
 		options: Parameters<LanguageModelV3["doGenerate"]>[0],
 	): Promise<Awaited<ReturnType<LanguageModelV3["doGenerate"]>>> {
-		const streamResult = await super.doStream(options)
+		const streamResult = await this.doStream(options)
 		const reader = streamResult.stream.getReader()
 
 		const content: Array<LanguageModelV3Content> = []
@@ -66,7 +115,10 @@ class CodexResponsesLanguageModel extends OpenAIResponsesLanguageModel {
 		const activeTextById = new Map<string, LanguageModelV3Content>()
 		const activeReasoningById = new Map<string, LanguageModelV3Content>()
 
-		let finishReason: LanguageModelV3FinishReason = "unknown"
+		let finishReason: LanguageModelV3FinishReason = {
+			unified: "other",
+			raw: undefined,
+		}
 		let usage: LanguageModelV3Usage = emptyUsage()
 		let providerMetadata: SharedV3ProviderMetadata | undefined
 		let responseMetadata: LanguageModelV3ResponseMetadata | undefined
@@ -191,6 +243,7 @@ class CodexResponsesLanguageModel extends OpenAIResponsesLanguageModel {
 
 					case "tool-call":
 					case "tool-result":
+					case "tool-approval-request":
 					case "file":
 					case "source": {
 						content.push(part)
@@ -265,7 +318,7 @@ export const createOpenAIOAuth = (
 	}
 
 	const createModel = (modelId: OpenAIOAuthModelId) =>
-		new CodexResponsesLanguageModel(modelId, config)
+		new CodexResponsesLanguageModel(modelId, config, settings.store ?? false)
 
 	const providerFn = (modelId: OpenAIOAuthModelId) => createModel(modelId)
 	const specificationVersion: ProviderV3["specificationVersion"] = "v3"

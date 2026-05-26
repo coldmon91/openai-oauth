@@ -98,6 +98,126 @@ export const getDefaultCodexInstructions = (): string => {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
 	typeof value === "object" && value !== null && !Array.isArray(value)
 
+const toolCallTypes = new Set([
+	"function_call",
+	"custom_tool_call",
+	"local_shell_call",
+	"shell_call",
+	"apply_patch_call",
+])
+
+const toolOutputTypes = new Set([
+	"function_call_output",
+	"custom_tool_call_output",
+	"local_shell_call_output",
+	"shell_call_output",
+	"apply_patch_call_output",
+])
+
+const MAX_TOOL_OUTPUT_LENGTH = 10_485_760
+const TOOL_OUTPUT_TRUNCATION_BUFFER = 1024
+
+const truncateLongString = (value: string, maxLength: number): string => {
+	if (value.length <= maxLength) {
+		return value
+	}
+	const keep = maxLength - TOOL_OUTPUT_TRUNCATION_BUFFER
+	const head = Math.floor(keep / 2)
+	const tail = keep - head
+	const removed = value.length - keep
+	return `${value.slice(0, head)}\n\n[... truncated ${removed} characters to fit the 10MB tool output limit ...]\n\n${value.slice(value.length - tail)}`
+}
+
+const sanitizeOversizedToolOutputs = (body: Record<string, unknown>): void => {
+	if (!Array.isArray(body.input)) {
+		return
+	}
+
+	for (const item of body.input) {
+		if (!isRecord(item) || typeof item.type !== "string") {
+			continue
+		}
+		if (!toolOutputTypes.has(item.type)) {
+			continue
+		}
+
+		const output = item.output
+		if (
+			typeof output === "string" &&
+			output.length > MAX_TOOL_OUTPUT_LENGTH
+		) {
+			item.output = truncateLongString(output, MAX_TOOL_OUTPUT_LENGTH)
+			continue
+		}
+
+		if (Array.isArray(output)) {
+			for (const part of output) {
+				if (!isRecord(part)) {
+					continue
+				}
+				if (
+					typeof part.text === "string" &&
+					part.text.length > MAX_TOOL_OUTPUT_LENGTH
+				) {
+					part.text = truncateLongString(part.text, MAX_TOOL_OUTPUT_LENGTH)
+				}
+			}
+		}
+	}
+}
+
+const validateStatelessResponsesInput = (
+	body: Record<string, unknown>,
+): string | undefined => {
+	if (body.store === true || !Array.isArray(body.input)) {
+		return undefined
+	}
+
+	const seenToolCallIds = new Set<string>()
+	for (const [index, item] of body.input.entries()) {
+		if (!isRecord(item)) {
+			continue
+		}
+
+		if (item.type === "item_reference" && typeof item.id === "string") {
+			return `Unresolved item_reference ${item.id} at input[${index}] cannot be sent when store is false. Replay the full item content or enable store.`
+		}
+
+		if (typeof item.type !== "string" || typeof item.call_id !== "string") {
+			continue
+		}
+
+		if (toolCallTypes.has(item.type)) {
+			seenToolCallIds.add(item.call_id)
+			continue
+		}
+
+		if (toolOutputTypes.has(item.type) && !seenToolCallIds.has(item.call_id)) {
+			return `No preceding tool call found for ${item.type} with call_id ${item.call_id} at input[${index}]. Stateless requests must keep each assistant tool call before its tool result; reset this conversation or replay the missing tool call.`
+		}
+	}
+
+	return undefined
+}
+
+const invalidResponsesRequest = (message: string): Response =>
+	new Response(
+		JSON.stringify({
+			error: {
+				message,
+				type: "invalid_request_error",
+				param: "input",
+				code: null,
+			},
+		}),
+		{
+			status: 400,
+			headers: {
+				"Content-Type": "application/json",
+			},
+		},
+	)
+
 const resolveBaseURL = (baseURL?: string): string => {
 	return withoutTrailingSlash(baseURL) ?? DEFAULT_CODEX_BASE_URL
 }
@@ -225,6 +345,7 @@ export const normalizeCodexResponsesBody = (
 type PreparedResponsesRequestBody = {
 	body: BodyInit | null | undefined
 	requestBody?: Record<string, unknown>
+	response?: Response
 }
 
 const prepareResponsesRequestBody = async (
@@ -264,6 +385,14 @@ const prepareResponsesRequestBody = async (
 		}
 
 		const expanded = state?.expandRequestBody(normalized) ?? normalized
+		sanitizeOversizedToolOutputs(expanded)
+		const validationError = validateStatelessResponsesInput(expanded)
+		if (validationError != null) {
+			return {
+				body: null,
+				response: invalidResponsesRequest(validationError),
+			}
+		}
 
 		return {
 			body: JSON.stringify(expanded),
@@ -341,6 +470,10 @@ export const createCodexOAuthFetch = (
 			settings,
 			responsesState,
 		)
+
+		if (preparedBody.response != null) {
+			return preparedBody.response
+		}
 
 		const response = await fetch(target.toString(), {
 			method: request.method ?? init?.method,

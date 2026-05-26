@@ -251,6 +251,186 @@ describe("createCodexOAuthFetch", () => {
 		})
 	})
 
+	test("rejects unresolved item references when store is false", async () => {
+		const authFilePath = await createAuthFile()
+		const fetch = vi.fn(async () => new Response(null, { status: 200 }))
+
+		const oauthFetch = createCodexOAuthFetch({
+			authFilePath,
+			ensureFresh: false,
+			fetch,
+		})
+
+		const response = await oauthFetch("https://example.test/v1/responses", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				model: "gpt-5.2",
+				input: [{ type: "item_reference", id: "fc_missing" }],
+			}),
+		})
+
+		expect(response.status).toBe(400)
+		expect(fetch).not.toHaveBeenCalled()
+		await expect(response.json()).resolves.toMatchObject({
+			error: {
+				message: expect.stringContaining(
+					"Unresolved item_reference fc_missing at input[0]",
+				),
+				param: "input",
+				type: "invalid_request_error",
+			},
+		})
+
+		await fs.rm(path.dirname(authFilePath), {
+			recursive: true,
+			force: true,
+		})
+	})
+
+	test("rejects tool outputs without preceding tool calls when store is false", async () => {
+		const authFilePath = await createAuthFile()
+		const fetch = vi.fn(async () => new Response(null, { status: 200 }))
+
+		const oauthFetch = createCodexOAuthFetch({
+			authFilePath,
+			ensureFresh: false,
+			fetch,
+		})
+
+		const response = await oauthFetch("https://example.test/v1/responses", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				model: "gpt-5.2",
+				input: [
+					{
+						type: "function_call_output",
+						call_id: "call_missing",
+						output: "{}",
+					},
+				],
+			}),
+		})
+
+		expect(response.status).toBe(400)
+		expect(fetch).not.toHaveBeenCalled()
+		await expect(response.json()).resolves.toMatchObject({
+			error: {
+				message: expect.stringContaining(
+					"No preceding tool call found for function_call_output with call_id call_missing at input[0]",
+				),
+				param: "input",
+				type: "invalid_request_error",
+			},
+		})
+
+		await fs.rm(path.dirname(authFilePath), {
+			recursive: true,
+			force: true,
+		})
+	})
+
+	test("truncates oversized tool outputs to fit OpenAI's 10MB limit", async () => {
+		const authFilePath = await createAuthFile()
+		const fetch = vi.fn(async () => new Response(null, { status: 200 }))
+
+		const oauthFetch = createCodexOAuthFetch({
+			authFilePath,
+			ensureFresh: false,
+			fetch,
+		})
+
+		const oversizedOutput = "x".repeat(15_000_000)
+
+		await oauthFetch("https://example.test/v1/responses", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				model: "gpt-5.2",
+				input: [
+					{
+						type: "function_call",
+						call_id: "call_1",
+						name: "shell",
+						arguments: "{}",
+					},
+					{
+						type: "function_call_output",
+						call_id: "call_1",
+						output: oversizedOutput,
+					},
+				],
+			}),
+		})
+
+		expect(fetch).toHaveBeenCalledTimes(1)
+		const [, init] = fetch.mock.calls[0] ?? []
+		const body = JSON.parse(String(init?.body))
+		const truncatedOutput: string = body.input[1].output
+
+		expect(truncatedOutput.length).toBeLessThanOrEqual(10_485_760)
+		expect(truncatedOutput.length).toBeLessThan(oversizedOutput.length)
+		expect(truncatedOutput).toContain("truncated")
+		expect(truncatedOutput).toContain("10MB")
+
+		await fs.rm(path.dirname(authFilePath), {
+			recursive: true,
+			force: true,
+		})
+	})
+
+	test("preserves tool outputs that are within the size limit", async () => {
+		const authFilePath = await createAuthFile()
+		const fetch = vi.fn(async () => new Response(null, { status: 200 }))
+
+		const oauthFetch = createCodexOAuthFetch({
+			authFilePath,
+			ensureFresh: false,
+			fetch,
+		})
+
+		const normalOutput = "hello world"
+
+		await oauthFetch("https://example.test/v1/responses", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				model: "gpt-5.2",
+				input: [
+					{
+						type: "function_call",
+						call_id: "call_1",
+						name: "shell",
+						arguments: "{}",
+					},
+					{
+						type: "function_call_output",
+						call_id: "call_1",
+						output: normalOutput,
+					},
+				],
+			}),
+		})
+
+		const [, init] = fetch.mock.calls[0] ?? []
+		const body = JSON.parse(String(init?.body))
+		expect(body.input[1].output).toBe(normalOutput)
+
+		await fs.rm(path.dirname(authFilePath), {
+			recursive: true,
+			force: true,
+		})
+	})
+
 	test("passes token url overrides through auth refresh", async () => {
 		const root = await fs.mkdtemp(
 			path.join(os.tmpdir(), "codex-oauth-refresh-"),
